@@ -107,6 +107,55 @@ def _record_room(record):
         return {}
 
 
+def _room_interval(room):
+    try:
+        start = datetime.fromisoformat(str(room.get('startAt')).replace('Z', '+00:00')).replace(tzinfo=None)
+        end = datetime.fromisoformat(str(room.get('endAt')).replace('Z', '+00:00')).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None, None
+    return start, end
+
+
+def _room_is_unmatched(room, now=None):
+    now = now or datetime.utcnow()
+    start, end = _room_interval(room)
+    if not start or not end or now >= start or room.get('failedAt'):
+        return False
+    members = len([member for member in (room.get('members') or []) if member])
+    capacity = max(2, int(room.get('capacity') or 2))
+    return members < capacity
+
+
+def _public_room(room):
+    """未匹配阶段不向匹配广场暴露联系方式。"""
+    if not _room_is_unmatched(room):
+        return room
+    public = json.loads(json.dumps(room, ensure_ascii=False))
+    for member in public.get('members') or []:
+        if member:
+            member.pop('wechatId', None)
+            member.pop('phone', None)
+    return public
+
+
+def _has_time_conflict(user_id, start, end, exclude_room_id=''):
+    if not user_id or not start or not end:
+        return False
+    for record in RoomRecord.objects.all().only('room_id', 'payload'):
+        if record.room_id == exclude_room_id:
+            continue
+        room = _record_room(record)
+        other_start, other_end = _room_interval(room)
+        if not other_start or not other_end or start >= other_end or other_start >= end:
+            continue
+        members = [member for member in (room.get('members') or []) if member]
+        if any(str(member.get('userId') or '') == str(user_id) for member in members):
+            return True
+        if str(room.get('ownerUserId') or '') == str(user_id):
+            return True
+    return False
+
+
 def _delete_expired_rooms():
     """按产品规则清理结束超过三天的服务器记录。"""
     now = datetime.utcnow()
@@ -205,7 +254,7 @@ def rooms(request, *args):
 
     if action == 'list':
         _delete_expired_rooms()
-        result = [_record_room(record)
+        result = [_public_room(_record_room(record))
                   for record in RoomRecord.objects.order_by('-updated_at')]
         profile = _profile_payload_for_actor(request)
         notices = []
@@ -223,13 +272,20 @@ def rooms(request, *args):
         room_id = str(room.get('id') or '')
         if not room_id:
             return JsonResponse({'code': -1, 'errorMsg': '缺少场地 ID'}, status=400)
-        RoomRecord.objects.update_or_create(
-            room_id=room_id,
-            defaults={
-                'payload': json.dumps(room, ensure_ascii=False),
-                'owner_user_id': str(room.get('ownerUserId') or ''),
-            },
-        )
+        owner_user_id = str(room.get('ownerUserId') or '')
+        start, end = _room_interval(room)
+        with transaction.atomic():
+            list(RoomRecord.objects.select_for_update().only('id'))
+            if _has_time_conflict(owner_user_id, start, end, room_id):
+                return JsonResponse({'code': -3, 'errorMsg': '你在这个时间段已有对局'},
+                                    json_dumps_params={'ensure_ascii': False})
+            RoomRecord.objects.update_or_create(
+                room_id=room_id,
+                defaults={
+                    'payload': json.dumps(room, ensure_ascii=False),
+                    'owner_user_id': owner_user_id,
+                },
+            )
         return JsonResponse({'code': 0, 'data': {'room': room}},
                             json_dumps_params={'ensure_ascii': False})
 
@@ -248,11 +304,16 @@ def rooms(request, *args):
             room = _record_room(record)
             current_members = room.get('members') or []
             incoming_members = incoming.get('members') or []
+            start, end = _room_interval(room)
+            list(RoomRecord.objects.select_for_update().only('id'))
             if len(current_members) < len(incoming_members):
                 current_members.extend([None] * (len(incoming_members) - len(current_members)))
 
             for index, member in enumerate(incoming_members):
                 if member and not current_members[index]:
+                    if _has_time_conflict(str(member.get('userId') or ''), start, end, room_id):
+                        return JsonResponse({'code': -3, 'errorMsg': '你在这个时间段已有对局'},
+                                            json_dumps_params={'ensure_ascii': False})
                     current_members[index] = member
 
             room['members'] = current_members
@@ -331,8 +392,13 @@ def rooms(request, *args):
         user_id = str(profile.get('userId') or '')
         nick_name = str(profile.get('nickName') or '').strip()
         wechat_name = str(profile.get('wechatName') or nick_name).strip()
+        wechat_id = str(profile.get('wechatId') or '').strip()
+        phone = str(profile.get('phone') or '').strip()
         if not nick_name:
             return JsonResponse({'code': -1, 'errorMsg': '昵称不能为空'}, status=400,
+                                json_dumps_params={'ensure_ascii': False})
+        if not wechat_id and not phone:
+            return JsonResponse({'code': -3, 'errorMsg': '微信号和手机号至少填写一个'},
                                 json_dumps_params={'ensure_ascii': False})
 
         key = _actor_key(request, profile)
@@ -342,6 +408,8 @@ def rooms(request, *args):
 
         profile['nickName'] = nick_name
         profile['wechatName'] = wechat_name
+        profile['wechatId'] = wechat_id
+        profile['phone'] = phone
         try:
             with transaction.atomic():
                 duplicate = False
