@@ -140,6 +140,15 @@ def _ensure_room_table():
 def _ensure_profile_table():
     table_name = UserProfile._meta.db_table
     if table_name in connection.introspection.table_names():
+        columns = {
+            column.name
+            for column in connection.introspection.get_table_description(
+                connection.cursor(), table_name
+            )
+        }
+        if 'nick_name' not in columns:
+            with connection.schema_editor() as schema_editor:
+                schema_editor.add_field(UserProfile, UserProfile._meta.get_field('nick_name'))
         return
     try:
         with connection.schema_editor() as schema_editor:
@@ -235,14 +244,56 @@ def rooms(request, *args):
     if action == 'profile':
         profile = body.get('profile') or {}
         user_id = str(profile.get('userId') or '')
-        wechat_name = str(profile.get('wechatName') or profile.get('nickName') or '')
+        nick_name = str(profile.get('nickName') or '').strip()
+        wechat_name = str(profile.get('wechatName') or nick_name).strip()
+        if not nick_name:
+            return JsonResponse({'code': -1, 'errorMsg': '昵称不能为空'}, status=400,
+                                json_dumps_params={'ensure_ascii': False})
 
         key = _actor_key(request, profile)
-        if key:
-            UserProfile.objects.update_or_create(
-                actor_key=key,
-                defaults={'payload': json.dumps(profile, ensure_ascii=False)},
-            )
+        if not key:
+            return JsonResponse({'code': -1, 'errorMsg': '无法识别当前用户'}, status=400,
+                                json_dumps_params={'ensure_ascii': False})
+
+        profile['nickName'] = nick_name
+        profile['wechatName'] = wechat_name
+        try:
+            with transaction.atomic():
+                duplicate = False
+                for existing in (UserProfile.objects
+                                  .exclude(actor_key=key)
+                                  .only('actor_key', 'nick_name', 'payload')):
+                    existing_name = str(existing.nick_name or '').strip()
+                    if not existing_name:
+                        try:
+                            existing_name = str(
+                                (json.loads(existing.payload) or {}).get('nickName') or ''
+                            ).strip()
+                        except (TypeError, ValueError):
+                            existing_name = ''
+                    if existing_name == nick_name:
+                        duplicate = True
+                        break
+                if duplicate:
+                    return JsonResponse(
+                        {'code': -2, 'errorMsg': '昵称已被使用，请换一个昵称'},
+                        json_dumps_params={'ensure_ascii': False},
+                    )
+                UserProfile.objects.update_or_create(
+                    actor_key=key,
+                    defaults={
+                        'nick_name': nick_name,
+                        'payload': json.dumps(profile, ensure_ascii=False),
+                    },
+                )
+        except Exception as error:
+            # 唯一索引是并发场景下的最终保护，避免两个请求同时通过查询。
+            if 'Duplicate entry' in str(error) or 'unique constraint' in str(error).lower():
+                return JsonResponse(
+                    {'code': -2, 'errorMsg': '昵称已被使用，请换一个昵称'},
+                    json_dumps_params={'ensure_ascii': False},
+                )
+            raise
 
         for record in RoomRecord.objects.all():
             room = _record_room(record)

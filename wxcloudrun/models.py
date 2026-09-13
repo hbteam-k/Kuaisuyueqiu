@@ -32,6 +32,8 @@ class RoomRecord(models.Model):
 
 class UserProfile(models.Model):
     actor_key = models.CharField(max_length=128, unique=True)
+    # 服务器层面保证昵称唯一；允许 NULL 以兼容旧表中尚未迁移的记录。
+    nick_name = models.CharField(max_length=128, unique=True, null=True, blank=True)
     payload = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
