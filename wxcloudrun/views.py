@@ -312,6 +312,8 @@ def rooms(request, *args):
                     member.update({
                         'name': profile.get('nickName') or member.get('name'),
                         'wechatName': wechat_name,
+                        'wechatId': profile.get('wechatId') or member.get('wechatId', ''),
+                        'phone': profile.get('phone') or member.get('phone', ''),
                         'avatarUrl': profile.get('avatarUrl') or member.get('avatarUrl', ''),
                         'note': profile.get('note') or '',
                     })
