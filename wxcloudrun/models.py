@@ -28,3 +28,13 @@ class RoomRecord(models.Model):
 
     class Meta:
         db_table = 'room_records'
+
+
+class UserProfile(models.Model):
+    actor_key = models.CharField(max_length=128, unique=True)
+    payload = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'user_profiles'

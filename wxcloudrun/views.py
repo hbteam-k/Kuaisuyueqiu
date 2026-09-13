@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from django.db import connection, transaction
 from django.http import JsonResponse
 from django.shortcuts import render
-from wxcloudrun.models import Counters, RoomRecord
+from wxcloudrun.models import Counters, RoomRecord, UserProfile
 
 
 logger = logging.getLogger('log')
@@ -137,15 +137,37 @@ def _ensure_room_table():
             raise
 
 
+def _ensure_profile_table():
+    table_name = UserProfile._meta.db_table
+    if table_name in connection.introspection.table_names():
+        return
+    try:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.create_model(UserProfile)
+    except Exception:
+        if table_name not in connection.introspection.table_names():
+            raise
+
+
+def _actor_key(request, profile=None):
+    openid = request.META.get('HTTP_X_WX_OPENID') or request.META.get('HTTP_X_WX_FROM_OPENID')
+    if openid:
+        return str(openid)
+    profile = profile or {}
+    return str(profile.get('userId') or profile.get('wechatName') or profile.get('nickName') or '')
+
+
 def rooms(request, *args):
     """服务器权威场地接口：list/create/join/profile。"""
     if request.method != 'POST':
         return JsonResponse({'code': -1, 'errorMsg': '仅支持 POST'}, status=405)
 
-    _ensure_room_table()
-
     body = _request_json(request)
     action = body.get('action')
+
+    _ensure_room_table()
+    if action in ('profile', 'profile_get'):
+        _ensure_profile_table()
 
     if action == 'list':
         _delete_expired_rooms()
@@ -198,10 +220,29 @@ def rooms(request, *args):
         return JsonResponse({'code': 0, 'data': {'room': room}},
                             json_dumps_params={'ensure_ascii': False})
 
+    if action == 'profile_get':
+        key = _actor_key(request)
+        if not key:
+            return JsonResponse({'code': 0, 'data': {'profile': None}},
+                                json_dumps_params={'ensure_ascii': False})
+        try:
+            profile = json.loads(UserProfile.objects.get(actor_key=key).payload)
+        except UserProfile.DoesNotExist:
+            profile = None
+        return JsonResponse({'code': 0, 'data': {'profile': profile}},
+                            json_dumps_params={'ensure_ascii': False})
+
     if action == 'profile':
         profile = body.get('profile') or {}
         user_id = str(profile.get('userId') or '')
         wechat_name = str(profile.get('wechatName') or profile.get('nickName') or '')
+
+        key = _actor_key(request, profile)
+        if key:
+            UserProfile.objects.update_or_create(
+                actor_key=key,
+                defaults={'payload': json.dumps(profile, ensure_ascii=False)},
+            )
 
         for record in RoomRecord.objects.all():
             room = _record_room(record)
