@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from django.db import connection, transaction
 from django.http import JsonResponse
 from django.shortcuts import render
-from wxcloudrun.models import Counters, RoomRecord, UserProfile
+from wxcloudrun.models import CancellationNotice, Counters, RoomRecord, UserProfile
 
 
 logger = logging.getLogger('log')
@@ -108,7 +108,7 @@ def _record_room(record):
 
 
 def _delete_expired_rooms():
-    """按产品规则清理结束超过两天的服务器记录。"""
+    """按产品规则清理结束超过三天的服务器记录。"""
     now = datetime.utcnow()
     for record in RoomRecord.objects.all().only('id', 'payload'):
         room = _record_room(record)
@@ -119,7 +119,7 @@ def _delete_expired_rooms():
             end = datetime.fromisoformat(end_at.replace('Z', '+00:00')).replace(tzinfo=None)
         except (TypeError, ValueError):
             continue
-        if now > end + timedelta(days=2):
+        if now > end + timedelta(days=3):
             record.delete()
 
 
@@ -158,6 +158,28 @@ def _ensure_profile_table():
             raise
 
 
+def _ensure_notice_table():
+    table_name = CancellationNotice._meta.db_table
+    if table_name in connection.introspection.table_names():
+        return
+    try:
+        with connection.schema_editor() as schema_editor:
+            schema_editor.create_model(CancellationNotice)
+    except Exception:
+        if table_name not in connection.introspection.table_names():
+            raise
+
+
+def _profile_payload_for_actor(request):
+    key = _actor_key(request)
+    if not key:
+        return {}
+    try:
+        return json.loads(UserProfile.objects.get(actor_key=key).payload) or {}
+    except (UserProfile.DoesNotExist, TypeError, ValueError):
+        return {}
+
+
 def _actor_key(request, profile=None):
     openid = request.META.get('HTTP_X_WX_OPENID') or request.META.get('HTTP_X_WX_FROM_OPENID')
     if openid:
@@ -177,12 +199,23 @@ def rooms(request, *args):
     _ensure_room_table()
     if action in ('profile', 'profile_get'):
         _ensure_profile_table()
+    if action in ('list', 'delete'):
+        _ensure_profile_table()
+        _ensure_notice_table()
 
     if action == 'list':
         _delete_expired_rooms()
         result = [_record_room(record)
                   for record in RoomRecord.objects.order_by('-updated_at')]
-        return JsonResponse({'code': 0, 'data': {'rooms': result}},
+        profile = _profile_payload_for_actor(request)
+        notices = []
+        user_id = str(profile.get('userId') or '')
+        if user_id:
+            notices = [json.loads(item.payload) for item in
+                       CancellationNotice.objects.filter(recipient_user_id=user_id)
+                       .order_by('created_at')]
+            CancellationNotice.objects.filter(recipient_user_id=user_id).delete()
+        return JsonResponse({'code': 0, 'data': {'rooms': result, 'notices': notices}},
                             json_dumps_params={'ensure_ascii': False})
 
     if action == 'create':
@@ -226,6 +259,58 @@ def rooms(request, *args):
             record.payload = json.dumps(room, ensure_ascii=False)
             record.save(update_fields=['payload', 'updated_at'])
 
+        return JsonResponse({'code': 0, 'data': {'room': room}},
+                            json_dumps_params={'ensure_ascii': False})
+
+    if action == 'delete':
+        incoming = body.get('room') or {}
+        room_id = str(incoming.get('id') or '')
+        profile = body.get('profile') or {}
+        if not room_id:
+            return JsonResponse({'code': -1, 'errorMsg': '缺少场地 ID'}, status=400)
+        actor_key = _actor_key(request, profile)
+        stored_profile = _profile_payload_for_actor(request)
+        actor_user_id = str(stored_profile.get('userId') or profile.get('userId') or '')
+        try:
+            record = RoomRecord.objects.get(room_id=room_id)
+        except RoomRecord.DoesNotExist:
+            return JsonResponse({'code': -1, 'errorMsg': '场地不存在'}, status=404)
+        room = _record_room(record)
+        owner_match = (actor_user_id and
+                       (str(room.get('ownerUserId') or '') == actor_user_id or
+                        str(record.owner_user_id or '') == actor_user_id))
+        if not owner_match and actor_key and stored_profile:
+            owner_match = room.get('ownerWechatName') == stored_profile.get('wechatName')
+        if not owner_match:
+            return JsonResponse({'code': -1, 'errorMsg': '没有删除权限'}, status=403)
+        try:
+            start = datetime.fromisoformat(str(room.get('startAt')).replace('Z', '+00:00')).replace(tzinfo=None)
+        except (TypeError, ValueError):
+            return JsonResponse({'code': -1, 'errorMsg': '场地时间无效'}, status=400)
+        if datetime.utcnow() >= start:
+            return JsonResponse({'code': -1, 'errorMsg': '已开始的对局不能删除'}, status=400)
+        members = [member for member in (room.get('members') or []) if member]
+        capacity = max(2, int(room.get('capacity') or 2))
+        if len(members) > capacity:
+            return JsonResponse({'code': -1, 'errorMsg': '场地状态已变化，请刷新后重试'}, status=400)
+        record.delete()
+        for member in members:
+            recipient = str(member.get('userId') or '')
+            if not recipient or recipient == actor_user_id:
+                continue
+            notice_id = f'{room_id}-{recipient}'
+            CancellationNotice.objects.update_or_create(
+                notice_id=notice_id,
+                defaults={
+                    'recipient_user_id': recipient,
+                    'room_id': room_id,
+                    'payload': json.dumps({
+                        'roomId': room_id,
+                        'title': room.get('title') or '拼场对局',
+                        'message': '你参加的对局已被发起人取消',
+                    }, ensure_ascii=False),
+                },
+            )
         return JsonResponse({'code': 0, 'data': {'room': room}},
                             json_dumps_params={'ensure_ascii': False})
 

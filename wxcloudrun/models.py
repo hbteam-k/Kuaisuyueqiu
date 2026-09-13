@@ -40,3 +40,14 @@ class UserProfile(models.Model):
 
     class Meta:
         db_table = 'user_profiles'
+
+
+class CancellationNotice(models.Model):
+    notice_id = models.CharField(max_length=128, unique=True)
+    recipient_user_id = models.CharField(max_length=128)
+    room_id = models.CharField(max_length=128)
+    payload = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'cancellation_notices'
