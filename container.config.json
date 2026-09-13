@@ -27,6 +27,7 @@
 	"executeSQLs":[
 		"CREATE DATABASE IF NOT EXISTS django_demo;",
 		"USE django_demo;",
-		"CREATE TABLE IF NOT EXISTS `Counters` (`id` int(11) NOT NULL AUTO_INCREMENT, `count` int(11) NOT NULL DEFAULT 1, `createdAt` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, `updatedAt` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`id`)) ENGINE = InnoDB DEFAULT CHARSET = utf8;"
+		"CREATE TABLE IF NOT EXISTS `Counters` (`id` int(11) NOT NULL AUTO_INCREMENT, `count` int(11) NOT NULL DEFAULT 1, `createdAt` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, `updatedAt` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`id`)) ENGINE = InnoDB DEFAULT CHARSET = utf8;",
+		"CREATE TABLE IF NOT EXISTS `room_records` (`id` bigint NOT NULL AUTO_INCREMENT, `room_id` varchar(128) NOT NULL, `payload` longtext NOT NULL, `owner_user_id` varchar(128) NOT NULL DEFAULT '', `created_at` datetime(6) NOT NULL, `updated_at` datetime(6) NOT NULL, PRIMARY KEY (`id`), UNIQUE KEY `room_records_room_id_uniq` (`room_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
 	]    
 }

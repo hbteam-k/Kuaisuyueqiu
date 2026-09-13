@@ -21,6 +21,9 @@ urlpatterns = (
     # 计数器接口
     url(r'^^api/count(/)?$', views.counter),
 
+    # 场地同步接口
+    url(r'^api/rooms/?$', views.rooms),
+
     # 获取主页
     url(r'(/)?$', views.index),
 )
